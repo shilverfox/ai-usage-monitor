@@ -310,14 +310,37 @@ struct Stat: View {
 
 /// 「21:00 重置」/「星期日12:00 重置」
 /// 「17:00 重置 · 3小时12分后」；日志没给重置时间时明确说出来，而不是留一行空白
+/// 重置时刻的日期表达。
+/// 超过一周必须带月日：只说「星期四」会被读成本周四，30 天窗口实测差 28 天。
+func resetDayLabel(_ date: Date, withTime: Bool) -> String {
+    let cal = Calendar.current
+    let days = cal.dateComponents([.day],
+                                  from: cal.startOfDay(for: Date()),
+                                  to: cal.startOfDay(for: date)).day ?? 0
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "zh_CN")
+    switch days {
+    case 0:     f.dateFormat = "HH:mm"          // 当天：具体时刻比「今天」更有用
+    case 1:     f.dateFormat = withTime ? "'明天'HH:mm" : "'明天'"
+    case 2...6: f.dateFormat = withTime ? "EEEE HH:mm" : "EEEE"
+    default:    f.dateFormat = withTime ? "M月d日 HH:mm" : "M月d日"
+    }
+    return withTime ? f.string(from: date).replacingOccurrences(of: " ", with: "") : f.string(from: date)
+}
+
 func resetLabel(_ date: Date?) -> String {
     guard let date else { return "重置时间未知" }
     if date < Date() { return "窗口已重置" }
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "zh_CN")
-    f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEEE HH:mm"
-    let clock = f.string(from: date).replacingOccurrences(of: " ", with: "")
-    return "\(clock) 重置 · \(countdown(to: date))"
+    let days = Calendar.current.dateComponents([.day],
+                                               from: Calendar.current.startOfDay(for: Date()),
+                                               to: Calendar.current.startOfDay(for: date)).day ?? 0
+    let clock = resetDayLabel(date, withTime: true)
+    // 相对天数用「日历天数差」，不用 countdown 的秒数整除：
+    // 后者会把 1.94 天说成「1天后」，与「星期五」自相矛盾。
+    if days >= 7 { return "\(clock) 重置" }              // 已有月日，不再叠相对量
+    if days == 1 { return "\(clock) 重置" }              // 「明天」已表达，再说「1天后」是重复
+    if days >= 2 { return "\(clock) 重置 · \(days)天后" }
+    return "\(clock) 重置 · \(countdown(to: date))"       // 当天：保留小时/分钟精度
 }
 
 /// 按「已用比例 vs 本周已过时间比例」判断进度，生成顶部的一句话
@@ -325,10 +348,7 @@ func paceHeadline(_ w: RateWindow) -> String {
     guard let pct = effectivePercent(w) else { return "额度窗口已重置，等待新数据。" }
     guard let reset = w.resetsAt else { return "日志未提供重置时间，无法判断节奏。" }
     guard reset > Date(), w.windowMinutes > 0 else { return "额度已重置，可以放心使用。" }
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "zh_CN")
-    f.dateFormat = Calendar.current.isDateInToday(reset) ? "HH:mm" : "EEEE"
-    let when = f.string(from: reset)
+    let when = resetDayLabel(reset, withTime: false)
     if pct >= 100 { return "额度已用完，将在\(when)重置。" }
     let total = Double(w.windowMinutes) * 60
     let elapsed = max(0, min(1, 1 - reset.timeIntervalSinceNow / total))
