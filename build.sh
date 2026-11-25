@@ -34,9 +34,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# 订阅抓取脚本随包分发，Bundle.main.path(forResource:) 才找得到
+mkdir -p "$APP/Contents/Resources"
+cp scripts/fetch_google_subscription.py "$APP/Contents/Resources/"
+
 codesign --force --sign - "$APP" >/dev/null
 echo "Built $APP"
-
 # ---- 安装到 /Applications ----
 # 必须先停掉运行中的实例，否则覆盖后签名与内存映像不一致
 if pgrep -f "$PATTERN" >/dev/null 2>&1; then

@@ -624,6 +624,7 @@ func codexFolded(_ store: UsageStore) -> String {
 
 struct ContentView: View {
     @ObservedObject var store: UsageStore
+    @ObservedObject var subs: SubscriptionStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -670,6 +671,7 @@ struct ContentView: View {
                         }
                     }
                 }
+                SubscriptionCard(store: subs)
             }
             HStack {
                 Text("更新于 \(store.lastUpdate.map { $0.formatted(date: .omitted, time: .standard) } ?? "-")")
@@ -684,17 +686,254 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Google 订阅
+
+struct SubRow: View {
+    let label: String
+    let value: String
+    var detail: String? = nil
+    var accent: Bool = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(value)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(accent ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail {
+                    Text(detail).font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+struct SubscriptionCard: View {
+    @ObservedObject var store: SubscriptionStore
+    @AppStorage("collapsed.subscription") private var collapsed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "creditcard").foregroundStyle(.indigo)
+                Text("Google 订阅").font(.headline)
+                Spacer()
+                if collapsed {
+                    Text(foldedText).font(.caption2).monospacedDigit()
+                        .foregroundStyle(.secondary).lineLimit(1)
+                } else {
+                    Text(updateText).font(.caption2).foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(collapsed ? -90 : 0))
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.18)) { collapsed.toggle() }
+            }
+            .help(collapsed ? "点击展开" : "点击折叠")
+
+            if !collapsed { content }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
+    }
+
+    @ViewBuilder private var content: some View {
+        if let snap = store.snapshot, let sub = snap.subscription, sub.plan != nil {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    Text(sub.provider ?? "Google").font(.subheadline.weight(.semibold))
+                    Text("·").font(.callout).foregroundStyle(.tertiary)
+                    Text(sub.plan ?? "").font(.callout).foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    statusChip(snap)
+                }
+                Divider()
+                if let first = snap.firstCharge {
+                    SubRow(label: "订阅始于", value: dayText(first.date),
+                           detail: "首笔记录：" + (first.title ?? "") + " " + first.amount)
+                }
+                if let end = snap.periodEndDate {
+                    SubRow(label: "本周期至", value: dayText(end), detail: dayDelta(end))
+                }
+                if let c = snap.lastCharge {
+                    SubRow(label: "上次扣款", value: "\(dayText(c.date))  \(c.amount)", detail: c.title)
+                }
+                nextChargeRow(snap)
+                if let price = sub.renewalPrice {
+                    SubRow(label: "续订价",
+                           value: price + (sub.renewalCycle == "year" ? "/年" : "/月"),
+                           detail: snap.autoRenew ? nil : "已取消，只有你手动重新订阅才按此价收费")
+                }
+                storageBlock(snap)
+                if let e = store.loadError {
+                    Text(e).font(.caption2).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                footRow(snap)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(store.loadError ?? "还没有订阅数据。点「刷新订阅」从 Google Play 读一次（约 15 秒，无窗口）。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    if store.refreshing {
+                        ProgressView().controlSize(.mini)
+                        Text("正在读取…").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("刷新订阅") { store.refresh(visible: false) }
+                        .controlSize(.mini).disabled(store.refreshing)
+                    Button("登录") { store.refresh(visible: true) }
+                        .controlSize(.mini).disabled(store.refreshing)
+                }
+            }
+        }
+    }
+
+    private func statusChip(_ s: SubscriptionSnapshot) -> some View {
+        let (text, color): (String, Color) = {
+            if s.isCancelled { return ("已取消 · 到期不续订", Color.gray) }
+            switch s.subscription?.status {
+            case "active": return ("自动续订中", Color.green)
+            case "expired": return ("已过期", Color.red)
+            case "paused": return ("已暂停", Color.orange)
+            default: return (s.subscription?.statusText ?? "状态未知", Color.gray)
+            }
+        }()
+        return Text(text)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.18)))
+            .foregroundStyle(color)
+    }
+
+    @ViewBuilder private func nextChargeRow(_ s: SubscriptionSnapshot) -> some View {
+        if let next = s.nextChargeDate {
+            let d = SubDate.daysBetween(Date(), next)
+            SubRow(label: "下次扣款",
+                   value: dayText(next) + "（自动续订）",
+                   detail: d <= 7 ? "⚠️ \(d) 天后自动扣款" : "还有 \(d) 天",
+                   accent: d <= 7)
+        } else {
+            SubRow(label: "下次扣款", value: "不会自动扣款",
+                   detail: "订阅已取消，到期后不会产生扣费")
+        }
+    }
+
+    @ViewBuilder private func storageBlock(_ s: SubscriptionSnapshot) -> some View {
+        if let st = s.storage, let used = st.usedGB, let total = st.totalGB, total > 0 {
+            let frac = max(0, min(used / total, 1))
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("存储用量").font(.callout)
+                        Text("\(st.usedText ?? "-") / \(st.totalText ?? "-")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(width: 150, alignment: .leading)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.accentColor.opacity(0.18))
+                            Capsule().fill(Color.accentColor)
+                                .frame(width: max(2, geo.size.width * CGFloat(frac)))
+                        }
+                    }
+                    .frame(height: 5)
+                    Text(String(format: "%.2f%%", used / total * 100))
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        .frame(width: 96, alignment: .trailing)
+                }
+                .padding(.vertical, 4)
+                if let items = st.breakdown, !items.isEmpty {
+                    Text(items.map {
+                        "\($0.name.replacingOccurrences(of: "Google ", with: "")) \($0.sizeText)"
+                    }.joined(separator: " · "))
+                    .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    private func footRow(_ s: SubscriptionSnapshot) -> some View {
+        HStack(spacing: 6) {
+            if let f = s.fetchedDate {
+                Text("订阅数据 " + relative(f)).font(.caption2).foregroundStyle(.tertiary)
+            }
+            if let c = s.chargesDate {
+                Text("· 扣款记录 " + relative(c)).font(.caption2).foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 4)
+            if store.refreshing {
+                ProgressView().controlSize(.mini)
+            }
+            Button("刷新订阅") { store.refresh(visible: false) }
+                .controlSize(.mini).disabled(store.refreshing)
+            Button("登录") { store.refresh(visible: true) }
+                .controlSize(.mini).disabled(store.refreshing)
+                .help("登录态失效时用：会弹出 Chrome 窗口让你登录一次")
+        }
+    }
+
+    /// "2027-11-25" → "2027年11月25日"
+    private func dayText(_ iso: String) -> String {
+        guard let d = SubDate.parse(iso) else { return iso }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "yyyy年M月d日"
+        return f.string(from: d)
+    }
+
+    private func dayText(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "yyyy年M月d日"
+        return f.string(from: d)
+    }
+
+    private func dayDelta(_ d: Date) -> String {
+        let n = SubDate.daysBetween(Date(), d)
+        if n > 0 { return "还有 \(n) 天" }
+        if n == 0 { return "就是今天" }
+        return "已过去 \(-n) 天"
+    }
+
+    private var foldedText: String {
+        guard let s = store.snapshot, let end = s.periodEndDate else { return "无数据" }
+        let n = SubDate.daysBetween(Date(), end)
+        return (s.isCancelled ? "已取消" : "续订中") + " · \(n)天后到期"
+    }
+
+    private var updateText: String {
+        guard let d = store.snapshot?.fetchedDate else { return "未获取" }
+        let f = DateFormatter()
+        f.dateFormat = "M月d日 HH:mm"
+        return "更新于 " + f.string(from: d)
+    }
+}
+
 // MARK: - App
 
 @main
 struct UsageMonitorApp: App {
     @StateObject private var store = UsageStore()
+    @StateObject private var subs = SubscriptionStore()
 
     var body: some Scene {
         MenuBarExtra {
-            ContentView(store: store)
+            ContentView(store: store, subs: subs)
         } label: {
-            Text(store.menuTitle).monospacedDigit()
+            Text(store.menuTitle + subs.menuSuffix).monospacedDigit()
         }
         .menuBarExtraStyle(.window)
     }
